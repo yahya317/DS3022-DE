@@ -251,3 +251,8 @@ __marimo__/
 
 # GH Archive hourly files downloaded by 04_apis/gharchive/00-basic-events.py
 04_apis/gharchive/data/
+
+# Local-only files (personal data, other AI tool notes, OS clutter)
+customers-2M.csv
+GEMINI.md
+.DS_Store
