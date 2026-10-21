@@ -19,6 +19,7 @@ to cycle through a series of related links to build up all 1000 records.
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,15 +37,19 @@ URL = "https://api.github.com/repos/git/git/commits"
 PER_PAGE = 100
 PAGES = 10
 
+# copy every prefect log line (including print() via log_prints) into a local file.
+# run loggers are children of "prefect", so one handler here catches them all
+LOG_FILE = Path(__file__).parent / "github_pagination.log"
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+logging.getLogger("prefect").addHandler(file_handler)
+
 
 # ------ only one task ------
 # create a single prefect task that loops through 10 pages
 # of git/git commits and stores each one into a duckdb table.
 # add more tasks and more data if you like, and do more with it.
 # if successful you should have 1000 records in your db.
-
-# local duckdb file, created if missing
-conn = duckdb.connect("actions.duckdb")  
 
 @task(name="ingest", log_prints=True, retries=3, retry_delay_seconds=5)
 def ingest_data():
@@ -67,14 +72,76 @@ def ingest_data():
     # if you need to see a working example of this, see this file in this repo
     # 04_apis/05_pagination.py
 
-    # just a placeholder for now. remove the print below this is built out
-    print("something")
+    logger = get_run_logger()
+    url = URL
+    params = {"per_page": PER_PAGE}
+    all_commits = []
+    page = 1
+
+    # follow GitHub's "next" links until we hit PAGES or run out of pages
+    while url and page <= PAGES:
+        # raise on 4xx/5xx so retries kick in instead of parsing an error body
+        try:
+            response = httpx.get(url, headers=HEADERS, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            # log which page failed, then re-raise so prefect marks the task failed and retries
+            logger.error(f"page {page} request failed: {e}")
+            raise
+        commits = response.json()
+        all_commits.extend(commits)
+        print(f"page {page}: {len(commits)} commits")
+
+        url = response.links.get("next", {}).get("url")  # None on the last page
+        params = None  # the "next" URL already has per_page and page in it
+        page += 1
+
+    print(f"total: {len(all_commits)} commits")
+
+    # flatten each nested commit dict into one tuple per table row
+    rows = [
+        (
+            c["sha"],
+            c["commit"]["author"]["name"],
+            c["commit"]["author"]["date"],
+            c["commit"]["message"].splitlines()[0],  # subject line only
+            c["html_url"],
+        )
+        for c in all_commits
+    ]
+    print(f"built {len(rows)} rows, first: {rows[0]}")
+
+    # local duckdb file, created if missing. opened here (not at import) so the
+    # file lock is released when the task ends, and each retry gets a fresh connection
+    conn = duckdb.connect("actions.duckdb")
+    try:
+        # replace on each run so re-running doesn't duplicate the 1000 rows
+        conn.execute("""
+            CREATE OR REPLACE TABLE commits (
+                sha         VARCHAR PRIMARY KEY,
+                author_name VARCHAR,
+                author_date TIMESTAMP,
+                message     VARCHAR,
+                url         VARCHAR
+            )
+        """)
+        conn.executemany("INSERT INTO commits VALUES (?, ?, ?, ?, ?)", rows)
+        count = conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+        print(f"stored {count} rows in actions.duckdb")
+    except duckdb.Error as e:
+        logger.error(f"duckdb write failed: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 # name the flow something you can identify as yourself
-@flow(name="nem2p-flow")
+@flow(name="vma3ux-flow")
 def main_flow():
     ingest_data()
 
 # it doesn't seem this flow executes when you run it. Why?
 # fix it ;^)
+# defining a flow doesn't run it; call it only when this file is run directly
+if __name__ == "__main__":
+    main_flow()
