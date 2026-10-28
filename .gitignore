@@ -256,3 +256,5 @@ __marimo__/
 customers-2M.csv
 GEMINI.md
 .DS_Store
+# Quix Streams local state directory
+state/
